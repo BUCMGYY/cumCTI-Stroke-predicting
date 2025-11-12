@@ -45,14 +45,12 @@ DISPLAY_TO_INTERNAL = {
     "social isolation": "social_isolation",
     "marital status": "Marital_status",
     "sleep duration": "Sleeping_time",
-    "regional category": "Regional_Category" if "Regional_Category" in [] else "Regional_Category".replace("_Category","_category"),  # 防呆：若你列名首字母大小写不同，请按需改回去
+    "regional category": "Regional_category",
     "cooking fuel use": "Cooking_fuel_use",
     "residence": "Residence",
     "education status": "Education_status",
     "stomach digestive disease": "Stomach",
 }
-# 如果上面 Regional 的名字和你训练时完全一致是 "Regional_category"，请把上一行替换回：
-DISPLAY_TO_INTERNAL["regional category"] = "Regional_category"
 
 # 训练时预处理器接收的内部列顺序（保持与你贴出来的 internal_order 一致）
 internal_order = [
@@ -70,14 +68,14 @@ internal_order = [
 ]
 # =========================================================================
 
-st.title("cumCTI-Stroke RF Predictor with SHAP")
+st.title("cumCTI-Stroke KNN Predictor with SHAP")  # 文案随你，模型实际是 RF
 
-# 加载整条 Pipeline（preprocess + rf）
+# ===== 加载整条 Pipeline（preprocess + rf）=====
 pipe = joblib.load('rf_model.pkl')
 preprocess = pipe.named_steps['preprocess']
 rf = pipe.named_steps['rf']
 
-# 动态生成输入项
+# ===== 动态生成输入项 =====
 st.header("Enter the following feature values:")
 feature_values_display = []
 for feature in DISPLAY_ORDER:
@@ -93,71 +91,84 @@ for feature in DISPLAY_ORDER:
         value = st.selectbox(
             label=f"{feature} (Select a value)",
             options=props.get("options", []),
-            index=(props.get("options", []).index(props.get("default")) if props.get("options") and props.get("default") in props["options"] else 0)
+            index=(props["options"].index(props["default"]) if props.get("options") and props.get("default") in props["options"] else 0),
         )
     feature_values_display.append(value)
 
-# 映射为模型需要的内部列，并对齐列顺序
+# ===== 映射为模型需要的内部列，并对齐列顺序 =====
 row_internal = {DISPLAY_TO_INTERNAL[d]: v for d, v in zip(DISPLAY_ORDER, feature_values_display)}
 X_user = pd.DataFrame([row_internal], columns=internal_order)
 
-# 预测与 SHAP（严格按你示例的写法组织变量名）
+# ===== 预测与 SHAP 可视化（按你示例代码的变量名来） =====
 if st.button("Predict"):
-    # 预处理 → 得到模型真实输入
-    Xt = preprocess.transform(X_user)
-    if sparse.issparse(Xt):
-        Xt = Xt.toarray()
+    # 1) 预测（示例变量名）
+    predicted_proba = pipe.predict_proba(X_user)[0]
+    pred_label = pipe.predict(X_user)[0]
+    predicted_class = int(pred_label)  # 供你的示例代码使用
 
-    # 与你示例一致的变量名
-    features = Xt
-    model = rf
+    probability = predicted_proba[predicted_class] * 100.0
 
-    # —— 你的示例：预测 + 概率 ——
-    predicted_class = model.predict(features)[0]
-    predicted_proba = model.predict_proba(features)[0]
-    probability = predicted_proba[int(predicted_class)] * 100
-
-    # —— 你的示例：文本图（保留 Times New Roman；若无该字体最多告警，不影响运行）——
+    # 2) 文本渲染（按你示例）
     text = f"Based on feature values, predicted possibility of Stroke is {probability:.2f}%"
     fig, ax = plt.subplots(figsize=(8, 1))
     ax.text(
         0.5, 0.5, text,
         fontsize=16, ha='center', va='center',
-        fontname='Times New Roman',
+        fontname='Times New Roman',   # 若容器无该字体，最多告警；你坚持用我就不改
         transform=ax.transAxes
     )
     ax.axis('off')
     plt.savefig("prediction_text.png", bbox_inches='tight', dpi=300)
     st.image("prediction_text.png")
 
-    # —— 你的示例：SHAP ——
-    explainer = shap.TreeExplainer(model)
+    # 3) SHAP —— 严格用你的 force_plot 调用，但保证传入“单样本、一维”向量
+    #    （并在 matplotlib=True 不被支持时，自动回退到 HTML 版本）
+    #    a) 先拿到模型真实输入（one-hot 后）
+    Xt = preprocess.transform(X_user)
+    if sparse.issparse(Xt):
+        Xt = Xt.toarray()
 
+    #    b) 与示例一致的变量名
+    features = Xt           # 你示例里用的变量名
+    model = rf              # 你示例里的 model
+
+    explainer = shap.TreeExplainer(model)
     raw_shap = explainer.shap_values(features)
     expected = explainer.expected_value
 
-    # 统一成 (n_samples, n_features, n_classes) 形状，确保下面示例调用不爆维度错
+    #    c) 统一为 (n_features,) 的单样本一维向量（否则 force_plot 会当成“多样本”）
     if isinstance(raw_shap, list):
-        shap_values = np.stack(raw_shap, axis=2)                  # list[类] -> 3D
-        expected_vec = np.array(expected if isinstance(expected, (list, np.ndarray)) else [expected]*shap_values.shape[2])
+        # 多分类：先取当前类别的 (n_samples, n_features)，再取第0个样本
+        sv_vec = np.array(raw_shap[predicted_class][0]).ravel()
+        base = expected[predicted_class] if isinstance(expected, (list, np.ndarray)) else expected
     else:
-        shap_values = raw_shap[:, :, None]                        # 二分类 2D -> 3D
-        expected_vec = np.array(expected if isinstance(expected, (list, np.ndarray)) else [expected])
+        # 二分类返回 (n_samples, n_features)
+        sv_vec = np.array(raw_shap[0]).ravel()
+        base = expected if not isinstance(expected, (list, np.ndarray)) else expected[0]
 
-    # one-hot 后的特征名
+    # one-hot 后特征名
     try:
         feature_names = preprocess.get_feature_names_out()
     except Exception:
         feature_names = np.array([f"f{i}" for i in range(features.shape[1])])
 
-    # 生成 SHAP 力图（保持你的函数签名）
-    class_index = int(predicted_class)
-    # 第三个参数必须与模型特征维度一致——用模型的 one-hot 特征，而不是原始输入列
-    shap.force_plot(
-        expected_vec[min(class_index, shap_values.shape[2]-1)],
-        shap_values[0, :, min(class_index, shap_values.shape[2]-1)],
-        pd.Series(features[0], index=feature_names),
-        matplotlib=True
-    )
-    plt.savefig("shap_force_plot.png", bbox_inches='tight', dpi=1200)
-    st.image("shap_force_plot.png")
+    try:
+        # 你示例里的 force_plot（matplotlib=True）
+        shap.force_plot(
+            base,
+            sv_vec,
+            pd.Series(features[0], index=feature_names),
+            matplotlib=True
+        )
+        plt.savefig("shap_force_plot.png", bbox_inches='tight', dpi=1200)
+        st.image("shap_force_plot.png")
+    except NotImplementedError:
+        # 某些 shap 版本不支持 matplotlib=True；回退到 HTML 强制图
+        plot = shap.force_plot(
+            base,
+            sv_vec,
+            pd.Series(features[0], index=feature_names),
+            matplotlib=False
+        )
+        import streamlit.components.v1 as components
+        components.html(shap.getjs() + plot.html(), height=400, scrolling=True)
